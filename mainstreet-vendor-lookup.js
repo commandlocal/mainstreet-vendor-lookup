@@ -1,0 +1,165 @@
+/*  mainstreet-vendor-lookup.js  — FINALIZED v2
+ *  ------------------------------------------------------------------
+ *  Deterministic vendor-cost lookup for Mainstreet Glas-Avenue.
+ *  Drives the real UI with Playwright so the POS builds its own
+ *  Vendor-Inquiry view model (the /IV/Inventory/InquiryView step a raw
+ *  fetch can't fake), then reads the /Inventory/Inquire response.
+ *
+ *  SELECTORS CONFIRMED LIVE (from the in-browser recording):
+ *    VIN field ............... #VINSearch
+ *    Glass tab ............... #GlassTab
+ *    Part row ................ table cell containing the NAGS part text
+ *    Select/Inquire checkbox . #agSelect
+ *    Vendor Inquiry .......... <a class="btn btn-primary">Vendor Inquiry</a>
+ *    Inquire (in panel) ...... button labelled "Inquire"
+ *    Result call captured .... POST /Glasave10/Inventory/Inquire  (VendItems[])
+ *
+ *  PICK RULE (final): cheapest GLASS row that is in-stock AND
+ *  "Available Locally". If none -> no_vendor_available => staff note.
+ *
+ *  SETUP / DEPLOY / n8n WIRING:
+ *    npm i express playwright && npx playwright install chromium
+ *    Deploy to Railway/Render (Dockerfile: FROM mcr.microsoft.com/playwright:v1.49.0-jammy)
+ *    env: MS_USERNAME, MS_PASSWORD, SHARED_SECRET
+ *    n8n HTTP Request node (replaces the Browserbase node in WF2):
+ *      POST https://<service>/lookup  header x-secret  body {"vin":"{{ $json.vin }}"}
+ *      -> feed vendor_cost / vendor_name / no_vendor_available into WF6.
+ *
+ *  // TODO:VERIFY on first tuning run (everything else is from live capture):
+ *    - profile-picker dropdown interaction ("MANAGER MANAGER")
+ *    - the VIN decode trigger (Enter vs. a search icon) + any confirm popup
+ *    - the exact "Inquire" button text/role in the vendor panel
+ *    - the logout link/URL (to free the seat)
+ *  ------------------------------------------------------------------
+ */
+
+const express = require('express');
+const { chromium } = require('playwright');
+
+const BASE = 'https://ga.mainstreetwebservices.com/Glasave10';
+
+// ---- FINAL PICK: cheapest in-stock, locally-available glass row ----
+function pickLocalCheapest(rows, nagsPart) {
+  const want = String(nagsPart || '').trim().toUpperCase();
+  const local = (rows || []).filter(r => {
+    const pid = String(r.PartID || '').trim().toUpperCase();
+    const localFlag = /available locally|in stock/i.test(String(r.Comment || ''));
+    return Number(r.PartType) === 0
+      && Number(r.QtyAvail) > 0
+      && Number(r.Cost) > 0
+      && localFlag
+      && pid.indexOf(want.slice(0, 8)) === 0; // same base part family (loosen/tighten as needed)
+  });
+  local.sort((a, b) => Number(a.Cost) - Number(b.Cost));
+  return local[0] || null;
+}
+
+async function lookup(vin) {
+  const browser = await chromium.launch({ headless: true });
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+
+  let vendItems = null;
+  page.on('response', async (resp) => {
+    if (resp.url().includes('/Inventory/Inquire')) {
+      try { const j = await resp.json(); if (j && j.VendItems) vendItems = j.VendItems; } catch (_) {}
+    }
+  });
+
+  try {
+    // 1) LOGIN (service uses its own configured credentials)
+    await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+    if (await page.locator('#Email').count()) {
+      await page.fill('#Email', process.env.MS_USERNAME);
+      await page.fill('#Password', process.env.MS_PASSWORD);
+      await page.getByRole('button', { name: /log in/i }).click().catch(() => {});
+      await page.waitForLoadState('networkidle').catch(() => {});
+    }
+    if (page.url().includes('MainstreetLogin')) {
+      // TODO:VERIFY Kendo employee dropdown — select MANAGER MANAGER, leave password empty
+      await page.getByText('MANAGER MANAGER', { exact: false }).first().click().catch(() => {});
+      await page.getByRole('button', { name: /log in/i }).click().catch(() => {});
+      await page.waitForLoadState('networkidle').catch(() => {});
+    }
+    if (page.url().includes('UserManager')) {
+      return { success: false, reason: 'busy', error: 'License exceeded (seat in use)' };
+    }
+
+    // 2) Identify the windshield (read-only AJAX — proven) so we know which row to pick
+    const info = await page.evaluate(async (VIN) => {
+      const jsonH = { 'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest','Accept':'*/*' };
+      const formH = { 'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','X-Requested-With':'XMLHttpRequest','Accept':'text/html, */*; q=0.01' };
+      const vd = await (await fetch('/Glasave10/Vehicle/VINValidator',{method:'POST',headers:jsonH,body:JSON.stringify({vin:VIN})})).json();
+      if (!vd.Success || !vd.Vehicle) return { error:'VINValidator' };
+      await fetch('/Glasave10/POS/Vehicle/OnVinSearch',{method:'POST',headers:jsonH,body:JSON.stringify({vinId:VIN})});
+      const vehicle = vd.Vehicle;
+      const vt = await (await fetch('/Glasave10/POS/Vehicle/VinData',{method:'POST',headers:formH,body:'vehicle='+encodeURIComponent(vehicle)})).text();
+      const g = id => (vt.match(new RegExp('id="'+id+'"[^>]*value="([^"]*)"'))||[])[1];
+      const qp='VehYear='+encodeURIComponent(g('VehYear'))+'&VehMake='+encodeURIComponent(g('VehMake'))+'&VehModel='+encodeURIComponent(g('VehModel'))+'&VehStyle='+encodeURIComponent(g('VehStyle'))+'&VehCarID=&VehGraphicID=&NagsDb=nagsea';
+      const sd = await (await fetch('/Glasave10/POS/Vehicle/StylesRead?'+qp,{headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}})).json();
+      if (!Array.isArray(sd)||!sd.length) return { error:'StylesRead' };
+      const vehidPadded = String(Math.round(sd[0].VehID)).padStart(8,'0');
+      const ll = await (await fetch('/Glasave10/POS/AutoGlassSelect/AutoGlassRead',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Requested-With':'XMLHttpRequest'},body:'sort=&group=&filter=&MaxId=0&cprccd=COD&Vehid='+vehidPadded+'&PartId=&Loccd=&AgId=0&ItemsJson=%5B%5D'})).json();
+      const wh = ll.Data.find(r=>r.NodeType==='TH'&&/windshield/i.test((r.cpartid||r.DescFilter||'')+''));
+      const cs = ll.Data.filter(r=>r.NodeType==='GH'&&r.ParentId===(wh?wh.Id:0)).sort((a,b)=>(b.Starcount||0)-(a.Starcount||0));
+      if (!cs.length) return { error:'no windshield' };
+      const best = cs[0];
+      const eb='sort=&group=&filter=&Id='+best.Id+'&ParentId='+best.ParentId+'&ChildId='+best.Id+'&MaxId=17&cmajor='+encodeURIComponent(best.cglassid||'')+'&citemtype=GLS&NodeType=GH&GlassDesc=Windshield&DescFilter='+encodeURIComponent(best.DescFilter||'')+'&cprccd=COD&Adhesive=Y&Molding=Y&Opening_seq=1&Clips=Y&Vehid='+vehidPadded+'&Pnotes=&PartId=&cglassid='+encodeURIComponent(best.cglassid||'')+'&Loccd=&Inquire=false&AgId=0&ItemsJson=%5B%5D&id='+best.Id;
+      const ex = await (await fetch('/Glasave10/POS/AutoGlassSelect/AutoGlassRead',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded','X-Requested-With':'XMLHttpRequest'},body:eb})).json();
+      const p = ex.Data.find(r=>r.nlist>0||r.nlabor>0)||ex.Data[0];
+      return { vehicle, vehid:vehidPadded, part_number:p.NagsPartID||p.cpartid||p.cmajor||best.cglassid, list_price:p.nlist||0, has_adas:best.hasADAS===true||best.hasADAS==='true' };
+    }, vin);
+    if (info.error) return { success:false, reason:'error', error:info.error };
+
+    // 3) Drive the real UI: decode VIN -> Glass -> select part -> Vendor Inquiry -> Inquire
+    await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'networkidle' });
+    await page.fill('#VINSearch', vin);                                    // VIN field (confirmed)
+    await page.press('#VINSearch', 'Enter');                               // TODO:VERIFY decode trigger
+    await page.getByRole('button', { name: /^(ok|yes)$/i }).click({ timeout: 4000 }).catch(() => {}); // VIN-decoder popup if any
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.locator('#GlassTab').click();                               // Glass tab (confirmed)
+    await page.waitForTimeout(1200);
+    await page.getByText(info.part_number, { exact: false }).first().click().catch(() => {}); // part row (confirmed)
+    await page.locator('#agSelect').first().check().catch(() => {});       // select/inquire checkbox (confirmed)
+    await page.getByRole('link', { name: /vendor inquiry/i }).click();     // Vendor Inquiry (confirmed) -> InquiryView
+    await page.getByRole('button', { name: /^inquire$/i }).click();        // TODO:VERIFY Inquire -> /Inventory/Inquire
+    await page.waitForResponse(r => r.url().includes('/Inventory/Inquire'), { timeout: 25000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+
+    // 4) Apply final pick + shape result
+    const win = pickLocalCheapest(vendItems || [], info.part_number);
+    return {
+      success: true,
+      status: win ? 'live' : 'needs_manual_pricing',
+      vehicle: info.vehicle, vehid: info.vehid,
+      part_number: info.part_number, list_price: info.list_price, has_adas: info.has_adas,
+      vendor_cost: win ? Number(win.Cost) : null,
+      vendor_name: win ? win.VendName : null,
+      vendor_part: win ? String(win.PartID || '').trim() : null,
+      no_vendor_available: !win, // true => WF6 needs_manual_pricing => WF2 staff note
+      vendor_rows: (vendItems || []).map(r => ({
+        vendor: r.VendName, part: String(r.PartID || '').trim(),
+        available: r.QtyAvail, cost: r.Cost, comment: r.Comment, part_type: r.PartType,
+      })),
+    };
+  } catch (err) {
+    return { success: false, reason: 'error', error: String(err && err.message || err) };
+  } finally {
+    // 5) ALWAYS log out so we never squat the single seat, then close
+    try { await page.goto(BASE + '/Account/LogOff', { waitUntil: 'domcontentloaded', timeout: 8000 }); } catch (_) {} // TODO:VERIFY logout URL
+    await browser.close().catch(() => {});
+  }
+}
+
+const app = express();
+app.use(express.json());
+app.post('/lookup', async (req, res) => {
+  if (process.env.SHARED_SECRET && req.headers['x-secret'] !== process.env.SHARED_SECRET) {
+    return res.status(401).json({ success: false, error: 'unauthorized' });
+  }
+  const vin = (req.body && req.body.vin || '').trim();
+  if (!vin) return res.status(400).json({ success: false, error: 'vin required' });
+  res.json(await lookup(vin));
+});
+app.get('/health', (_, res) => res.json({ ok: true }));
+app.listen(process.env.PORT || 3000, () => console.log('vendor-lookup up'));

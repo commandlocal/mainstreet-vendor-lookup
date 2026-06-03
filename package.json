@@ -1,0 +1,13 @@
+{
+  "name": "mainstreet-vendor-lookup",
+  "version": "1.0.0",
+  "private": true,
+  "main": "mainstreet-vendor-lookup.js",
+  "scripts": {
+    "start": "node mainstreet-vendor-lookup.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "1.49.0"
+  }
+}
