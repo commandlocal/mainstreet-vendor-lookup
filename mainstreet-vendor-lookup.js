@@ -143,8 +143,11 @@ async function lookup(vin) {
     await page.getByText(String(info.part_number).slice(0, 7), { exact: false }).first().click().catch(() => {}); // TODO:VERIFY part row
     await page.waitForTimeout(1000);
     await page.locator('#agSelect').first().check().catch(() => {});    // select/inquire checkbox (confirmed)
-    await page.getByRole('link', { name: /vendor inquiry/i }).click();  // Vendor Inquiry (confirmed) -> InquiryView
-    await page.getByRole('button', { name: /^inquire$/i }).click();     // TODO:VERIFY Inquire button -> /Inventory/Inquire
+    // Vendor Inquiry is an <a class="btn btn-primary"> (no href -> not a real 'link'); match by text
+    await page.locator('a:has-text("Vendor Inquiry"), button:has-text("Vendor Inquiry")').first().click();
+    await page.waitForTimeout(2000);                                    // panel opens (fires InquiryView)
+    // Inquire button inside the panel (exact text so it doesn't match "Vendor Inquiry")
+    await page.locator('input[value="Inquire"], button:text-is("Inquire"), a:text-is("Inquire")').first().click().catch(() => {});
     await page.waitForResponse(r => r.url().includes('/Inventory/Inquire'), { timeout: 25000 }).catch(() => {});
     await page.waitForTimeout(1500);
 
