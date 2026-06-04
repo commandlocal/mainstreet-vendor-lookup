@@ -75,10 +75,17 @@ async function lookup(vin) {
       await page.locator('input[value="Log In"], button:has-text("Log In")').first().click().catch(() => {});
       await page.waitForTimeout(4000);   // let the redirect to the profile picker actually land
     }
-    // 1b) PROFILE PICKER: "MANAGER MANAGER" is ALREADY the default selection.
-    //     IMPORTANT: click ONLY the Log In button here. Do NOT touch the dropdown or anything else.
-    for (let attempt = 0; attempt < 4; attempt++) {
+    // 1b) PROFILE PICKER: fresh server session has NO remembered default (combo is empty),
+    //     so we must SELECT "MANAGER MANAGER" then click Log In. Type to filter -> Enter -> submit.
+    for (let attempt = 0; attempt < 3; attempt++) {
       if (!page.url().includes('MainstreetLogin')) break;
+      const sel = page.locator('input[name="SelectedID_input"]').first();
+      await sel.click().catch(() => {});
+      await sel.fill('').catch(() => {});
+      await sel.pressSequentially('MANAGER', { delay: 80 }).catch(() => {});  // filters list to MANAGER MANAGER
+      await page.waitForTimeout(1000);
+      await sel.press('Enter').catch(() => {});                                // lock in the highlighted match
+      await page.waitForTimeout(700);
       await page.locator('input[value="Log In"]').first().click().catch(() => {});
       await page.waitForTimeout(4000);
     }
