@@ -142,12 +142,16 @@ async function lookup(vin) {
     // part rows show the BASE part number (e.g. "FW03844"); click the matching windshield row
     await page.getByText(String(info.part_number).slice(0, 7), { exact: false }).first().click().catch(() => {}); // TODO:VERIFY part row
     await page.waitForTimeout(1000);
-    await page.locator('#agSelect').first().check().catch(() => {});    // select/inquire checkbox (confirmed)
-    // Vendor Inquiry is an <a class="btn btn-primary"> (no href -> not a real 'link'); match by text
-    await page.locator('a:has-text("Vendor Inquiry"), button:has-text("Vendor Inquiry")').first().click();
-    await page.waitForTimeout(2000);                                    // panel opens (fires InquiryView)
-    // Inquire button inside the panel (exact text so it doesn't match "Vendor Inquiry")
-    await page.locator('input[value="Inquire"], button:text-is("Inquire"), a:text-is("Inquire")').first().click().catch(() => {});
+    await page.locator('#agSelect').first().check().catch(() => {});         // tick the Inquire checkbox
+    await page.waitForTimeout(1500);
+    // a "no cost found" popup appears and BLOCKS the page (covers Vendor Inquiry) -- dismiss it (was missing)
+    await page.locator('#btnOk').click({ timeout: 6000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+    await page.locator('#agSelect').first().check().catch(() => {});         // re-tick (resets after the popup)
+    await page.waitForTimeout(800);
+    await page.locator('a:has-text("Vendor Inquiry")').first().click();      // -> InquiryView
+    await page.waitForTimeout(2500);
+    await page.locator('#btnInquire').click();                               // Inquire button (id) -> /Inventory/Inquire
     await page.waitForResponse(r => r.url().includes('/Inventory/Inquire'), { timeout: 25000 }).catch(() => {});
     await page.waitForTimeout(1500);
 
@@ -173,6 +177,7 @@ async function lookup(vin) {
     };
   } catch (err) {
     let where = '', diag = {};
+    try { await page.screenshot({ path: '/tmp/last.png', fullPage: true }); } catch (_) {}
     try {
       where = page.url();
       diag.combobox = await page.locator('.k-combobox').count();
@@ -200,4 +205,5 @@ app.post('/lookup', async (req, res) => {
   res.json(await lookup(vin));
 });
 app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/lastshot', (_, res) => res.sendFile('/tmp/last.png', (e) => { if (e) res.status(404).send('no screenshot yet'); }));
 app.listen(process.env.PORT || 3000, () => console.log('vendor-lookup up'));
