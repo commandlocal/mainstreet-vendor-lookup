@@ -76,9 +76,12 @@ async function lookup(vin) {
       await page.waitForLoadState('networkidle').catch(() => {});
     }
     if (page.url().includes('MainstreetLogin')) {
-      // TODO:VERIFY Kendo employee dropdown — select MANAGER MANAGER, leave password empty
-      await page.getByText('MANAGER MANAGER', { exact: false }).first().click().catch(() => {});
-      await page.getByRole('button', { name: /log in/i }).click().catch(() => {});
+      // profile picker is a Kendo combobox; select "MANAGER  MANAGER" (label has a double space), leave password empty
+      await page.locator('.k-combobox').first().click().catch(() => {});
+      await page.waitForTimeout(500);
+      await page.locator('li[role="option"]', { hasText: /MANAGER\s+MANAGER/i }).first().click().catch(() => {});
+      await page.waitForTimeout(300);
+      await page.locator('input[value="Log In"]').first().click().catch(() => {});
       await page.waitForLoadState('networkidle').catch(() => {});
     }
     if (page.url().includes('UserManager')) {
