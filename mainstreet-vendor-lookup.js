@@ -72,17 +72,15 @@ async function lookup(vin) {
     if (await page.locator('#Email').count()) {
       await page.fill('#Email', process.env.MS_USERNAME);
       await page.fill('#Password', process.env.MS_PASSWORD);
-      await page.getByRole('button', { name: /log in/i }).click().catch(() => {});
-      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.locator('input[value="Log In"], button:has-text("Log In")').first().click().catch(() => {});
+      await page.waitForTimeout(4000);   // let the redirect to the profile picker actually land
     }
-    if (page.url().includes('MainstreetLogin')) {
-      // profile picker is a Kendo combobox; select "MANAGER  MANAGER" (label has a double space), leave password empty
-      await page.locator('.k-combobox').first().click().catch(() => {});
-      await page.waitForTimeout(500);
-      await page.locator('li[role="option"]', { hasText: /MANAGER\s+MANAGER/i }).first().click().catch(() => {});
-      await page.waitForTimeout(300);
+    // 1b) PROFILE PICKER: "MANAGER MANAGER" is ALREADY the default selection.
+    //     IMPORTANT: click ONLY the Log In button here. Do NOT touch the dropdown or anything else.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (!page.url().includes('MainstreetLogin')) break;
       await page.locator('input[value="Log In"]').first().click().catch(() => {});
-      await page.waitForLoadState('networkidle').catch(() => {});
+      await page.waitForTimeout(4000);
     }
     if (page.url().includes('UserManager')) {
       return { success: false, reason: 'busy', error: 'License exceeded (seat in use)' };
@@ -164,8 +162,16 @@ async function lookup(vin) {
       })),
     };
   } catch (err) {
-    let where = ''; try { where = page.url(); } catch (_) {}
-    return { success: false, reason: 'error', error: String(err && err.message || err), where };
+    let where = '', diag = {};
+    try {
+      where = page.url();
+      diag.combobox = await page.locator('.k-combobox').count();
+      diag.options = await page.locator('li[role="option"]').count();
+      diag.comboValue = await page.locator('input[name="SelectedID_input"]').inputValue().catch(() => null);
+      diag.loginBtn = await page.locator('input[value="Log In"]').count();
+      diag.vinAttached = await page.locator('#Inv_cvin').count();
+    } catch (_) {}
+    return { success: false, reason: 'error', error: String(err && err.message || err), where, diag };
   } finally {
     // 5) ALWAYS log out so we never squat the single seat, then close
     try { await page.goto(BASE + '/Account/LogOff', { waitUntil: 'domcontentloaded', timeout: 8000 }); } catch (_) {} // TODO:VERIFY logout URL
