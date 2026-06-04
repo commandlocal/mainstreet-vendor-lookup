@@ -114,12 +114,15 @@ async function lookup(vin) {
     // 3) Drive the real UI: decode VIN -> Glass -> select part -> Vendor Inquiry -> Inquire
     //    (selectors below confirmed live in the page)
     await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'domcontentloaded' });
-    // a direct nav can briefly bounce to the dashboard, so wait for the real VIN box, retrying the nav
-    let ready = false;
-    for (let i = 0; i < 4 && !ready; i++) {
-      try { await page.waitForSelector('#Inv_cvin', { state: 'visible', timeout: 8000 }); ready = true; }
-      catch (_) { await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'domcontentloaded' }); await page.waitForTimeout(2000); }
+    // quote can bounce via the dashboard then load; wait for the VIN box to EXIST (may be hidden), retry nav
+    let attached = false;
+    for (let i = 0; i < 5 && !attached; i++) {
+      try { await page.waitForSelector('#Inv_cvin', { state: 'attached', timeout: 6000 }); attached = true; }
+      catch (_) { await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'domcontentloaded' }); await page.waitForTimeout(2500); }
     }
+    // the VIN box lives on the Auto tab — activate it so the field becomes visible
+    await page.locator('#AutoTab').click().catch(() => {});
+    await page.waitForTimeout(1500);
     await page.fill('#Inv_cvin', vin);                                  // VIN field (confirmed)
     await page.locator('#vin-search_btn').first().click();              // decode button (confirmed)
     await page.waitForSelector('#btnApply', { timeout: 15000 });        // VIN De-Coder popup
@@ -158,7 +161,8 @@ async function lookup(vin) {
       })),
     };
   } catch (err) {
-    return { success: false, reason: 'error', error: String(err && err.message || err) };
+    let where = ''; try { where = page.url(); } catch (_) {}
+    return { success: false, reason: 'error', error: String(err && err.message || err), where };
   } finally {
     // 5) ALWAYS log out so we never squat the single seat, then close
     try { await page.goto(BASE + '/Account/LogOff', { waitUntil: 'domcontentloaded', timeout: 8000 }); } catch (_) {} // TODO:VERIFY logout URL
