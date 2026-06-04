@@ -38,20 +38,20 @@ const { chromium } = require('playwright');
 
 const BASE = 'https://ga.mainstreetwebservices.com/Glasave10';
 
-// ---- FINAL PICK: cheapest in-stock, locally-available glass row ----
-function pickLocalCheapest(rows, nagsPart) {
+// ---- PICK (final rule): in-town/Corpus first; else regional w/ order alert; else staff ----
+// "Available Locally" == in town (Corpus Christi) == bookable now.
+function pickVendor(rows, nagsPart) {
   const want = String(nagsPart || '').trim().toUpperCase();
-  const local = (rows || []).filter(r => {
+  const byCost = (a, b) => Number(a.Cost) - Number(b.Cost);
+  const avail = (rows || []).filter(r => {
     const pid = String(r.PartID || '').trim().toUpperCase();
-    const localFlag = /available locally|in stock/i.test(String(r.Comment || ''));
-    return Number(r.PartType) === 0
-      && Number(r.QtyAvail) > 0
-      && Number(r.Cost) > 0
-      && localFlag
-      && pid.indexOf(want.slice(0, 8)) === 0; // same base part family (loosen/tighten as needed)
+    return Number(r.PartType) === 0 && Number(r.QtyAvail) > 0 && Number(r.Cost) > 0
+      && pid.indexOf(want.slice(0, 8)) === 0;       // same windshield family
   });
-  local.sort((a, b) => Number(a.Cost) - Number(b.Cost));
-  return local[0] || null;
+  const local = avail.filter(r => /available locally/i.test(String(r.Comment || '')));
+  if (local.length)  { local.sort(byCost); return { win: local[0], available_local: true,  needs_ordering: false }; } // in town -> book now
+  if (avail.length)  { avail.sort(byCost); return { win: avail[0], available_local: false, needs_ordering: true  }; } // regional -> quote + order alert
+  return { win: null, available_local: false, needs_ordering: false };                                                // nothing -> staff note
 }
 
 async function lookup(vin) {
@@ -112,31 +112,46 @@ async function lookup(vin) {
     if (info.error) return { success:false, reason:'error', error:info.error };
 
     // 3) Drive the real UI: decode VIN -> Glass -> select part -> Vendor Inquiry -> Inquire
-    await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'networkidle' });
-    await page.fill('#VINSearch', vin);                                    // VIN field (confirmed)
-    await page.press('#VINSearch', 'Enter');                               // TODO:VERIFY decode trigger
-    await page.getByRole('button', { name: /^(ok|yes)$/i }).click({ timeout: 4000 }).catch(() => {}); // VIN-decoder popup if any
+    //    (selectors below confirmed live in the page)
+    await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'domcontentloaded' });
+    // a direct nav can briefly bounce to the dashboard, so wait for the real VIN box, retrying the nav
+    let ready = false;
+    for (let i = 0; i < 4 && !ready; i++) {
+      try { await page.waitForSelector('#Inv_cvin', { state: 'visible', timeout: 8000 }); ready = true; }
+      catch (_) { await page.goto(BASE + '/POS/Invoice/Index', { waitUntil: 'domcontentloaded' }); await page.waitForTimeout(2000); }
+    }
+    await page.fill('#Inv_cvin', vin);                                  // VIN field (confirmed)
+    await page.locator('#vin-search_btn').first().click();              // decode button (confirmed)
+    await page.waitForSelector('#btnApply', { timeout: 15000 });        // VIN De-Coder popup
+    await page.locator('#btnApply').click();                            // OK / apply decode (confirmed)
     await page.waitForLoadState('networkidle').catch(() => {});
-    await page.locator('#GlassTab').click();                               // Glass tab (confirmed)
-    await page.waitForTimeout(1200);
-    await page.getByText(info.part_number, { exact: false }).first().click().catch(() => {}); // part row (confirmed)
-    await page.locator('#agSelect').first().check().catch(() => {});       // select/inquire checkbox (confirmed)
-    await page.getByRole('link', { name: /vendor inquiry/i }).click();     // Vendor Inquiry (confirmed) -> InquiryView
-    await page.getByRole('button', { name: /^inquire$/i }).click();        // TODO:VERIFY Inquire -> /Inventory/Inquire
+    await page.waitForTimeout(2000);
+    await page.locator('#GlassTab').click();                            // Glass tab (confirmed)
+    await page.waitForTimeout(2500);
+    // part rows show the BASE part number (e.g. "FW03844"); click the matching windshield row
+    await page.getByText(String(info.part_number).slice(0, 7), { exact: false }).first().click().catch(() => {}); // TODO:VERIFY part row
+    await page.waitForTimeout(1000);
+    await page.locator('#agSelect').first().check().catch(() => {});    // select/inquire checkbox (confirmed)
+    await page.getByRole('link', { name: /vendor inquiry/i }).click();  // Vendor Inquiry (confirmed) -> InquiryView
+    await page.getByRole('button', { name: /^inquire$/i }).click();     // TODO:VERIFY Inquire button -> /Inventory/Inquire
     await page.waitForResponse(r => r.url().includes('/Inventory/Inquire'), { timeout: 25000 }).catch(() => {});
     await page.waitForTimeout(1500);
 
     // 4) Apply final pick + shape result
-    const win = pickLocalCheapest(vendItems || [], info.part_number);
+    const pick = pickVendor(vendItems || [], info.part_number);
+    const win = pick.win;
     return {
       success: true,
-      status: win ? 'live' : 'needs_manual_pricing',
+      // live = in-town/bookable; needs_ordering = quote but alert client (out of town); needs_manual_pricing = staff note
+      status: win ? (pick.available_local ? 'live' : 'needs_ordering') : 'needs_manual_pricing',
       vehicle: info.vehicle, vehid: info.vehid,
       part_number: info.part_number, list_price: info.list_price, has_adas: info.has_adas,
       vendor_cost: win ? Number(win.Cost) : null,
       vendor_name: win ? win.VendName : null,
       vendor_part: win ? String(win.PartID || '').trim() : null,
-      no_vendor_available: !win, // true => WF6 needs_manual_pricing => WF2 staff note
+      available_local: pick.available_local,   // in town (Corpus) -> bookable now
+      needs_ordering: pick.needs_ordering,     // out of town -> quote + "we'll order it & reach out to schedule"
+      no_vendor_available: !win,               // nothing anywhere -> staff note
       vendor_rows: (vendItems || []).map(r => ({
         vendor: r.VendName, part: String(r.PartID || '').trim(),
         available: r.QtyAvail, cost: r.Cost, comment: r.Comment, part_type: r.PartType,
