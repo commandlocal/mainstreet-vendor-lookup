@@ -117,7 +117,12 @@ async function lookup(vin) {
       const p = ex.Data.find(r=>r.nlist>0||r.nlabor>0)||ex.Data[0];
       return { vehicle, vehid:vehidPadded, part_number:p.NagsPartID||p.cpartid||p.cmajor||best.cglassid, list_price:p.nlist||0, has_adas:best.hasADAS===true||best.hasADAS==='true' };
     }, vin);
-    if (info.error) return { success:false, reason:'error', error:info.error };
+    if (info.error) {
+      let where = '';
+      try { await page.screenshot({ path: '/tmp/last.png', fullPage: true }); } catch (_) {}
+      try { where = page.url(); } catch (_) {}
+      return { success: false, reason: 'error', error: info.error, where };
+    }
 
     // 3) Drive the real UI: decode VIN -> Glass -> select part -> Vendor Inquiry -> Inquire
     //    (selectors below confirmed live in the page)
